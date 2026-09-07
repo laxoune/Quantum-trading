@@ -1,49 +1,116 @@
 # Quantum-Trading
 
-Hybrid classical–quantum framework for equity price forecasting. An LSTM
-produces a baseline price forecast; a trainable **Qiskit Variational
-Quantum Circuit (VQC)** learns to correct the LSTM's residual error using
-market volatility (VIX) and momentum (% change) as context features.
+Hybrid classical–quantum framework spanning both halves of quantum
+finance: **forecasting** (predict an asset's price) and **allocation**
+(decide which assets to hold). Trainable Qiskit VQCs handle forecasting
+for all 5 assets in a real portfolio universe; QAOA handles allocation;
+a hybrid pipeline connects the two so real forecasts drive a real
+portfolio decision — no placeholder numbers anywhere.
 
-**Result:** on 39 held-out trading days, the quantum-corrected model
-reduced MSE by ~82% versus the LSTM baseline alone (346.01 → 63.57).
+## The 5-asset universe
 
-| Model | MSE | MAE |
+Real historical data (via yfinance), ~5 years, one ticker standing in
+for each category:
+
+| Label | Ticker | Represents |
 |---|---|---|
-| LSTM alone | 346.01 | 18.05 |
-| LSTM + Quantum-VQC correction | 63.57 | 6.96 |
+| Tech | NVDA | Growth / tech |
+| Utility | XLU | Utilities sector ETF |
+| Energy | XLE | Energy sector ETF |
+| Healthcare | XLV | Healthcare sector ETF |
+| Bond-like | BND | Bond market ETF |
 
-## Circuit
+## Stage 1 — Forecasting, all 5 assets (`multi_asset_forecast.py`)
 
-- 3 qubits (LSTM prediction, VIX level, % change)
-- `ZFeatureMap` for data encoding + `RealAmplitudes` ansatz (9 trainable weights)
-- Optimized via COBYLA, trained on 152 days, tested on 39 unseen days
+For each asset: a small LSTM produces a one-step-ahead price forecast,
+then a trainable **Qiskit Variational Quantum Circuit (VQC)** learns to
+correct the LSTM's residual error using VIX and % change as context
+features (same architecture as the original single-asset model: 3
+qubits, `ZFeatureMap` + `RealAmplitudes` ansatz, COBYLA-optimized).
+
+**Results (real, out-of-sample):**
+
+| Asset | LSTM MSE | LSTM+VQC MSE | Change | Implied annual return |
+|---|---|---|---|---|
+| Tech | 110.84 | 72.82 | **+34.3%** better | +23.8% |
+| Utility | 0.40 | 0.67 | **−65.5%** worse | −13.7% |
+| Energy | 21.24 | 9.50 | **+55.3%** better | +29.4% |
+| Healthcare | 11.06 | 8.90 | **+19.5%** better | +64.1% |
+| Bond-like | 0.11 | 0.07 | **+38.2%** better | −1.2% |
+
+**Honest finding:** the quantum correction helped 4 of 5 assets and made
+Utility measurably worse. That's a real, uncherry-picked result worth
+stating plainly rather than a claim that quantum correction always helps.
+
+## Stage 2 — Allocation (`qaoa_portfolio_optimization.py`)
+
+QAOA solves a Markowitz QUBO to select the best 3-of-5 portfolio,
+cross-checked against an exact classical brute-force solver.
+
+## The fully-real hybrid pipeline (`real_hybrid_pipeline.py`)
+
+Loads Stage 1's real expected returns (`real_mu.npy`) and a real
+covariance matrix computed from actual historical daily returns across
+all 5 assets (`real_cov.npy` — not an illustrative correlation guess),
+then runs QAOA on them.
+
+**Result:** QAOA selected **Tech, Energy, Healthcare** — exactly the
+three assets with positive real forecasted returns — and matched the
+exact classical optimum. Utility and Bond-like, both forecast to lose
+money, were correctly excluded.
+
+*(An earlier version of this pipeline, `hybrid_forecast_to_portfolio.py`,
+used a real forecast for Tech only with placeholder estimates for the
+other four — kept in the repo for reference, but superseded by the fully-
+real version above.)*
+
+## Visualizations (`visualizations/`)
+
+- `forecast_comparison_all_assets.png` — Real vs LSTM vs Quantum-Corrected price, all 5 assets, held-out test days
+- `mse_comparison_by_asset.png` — forecast error bar chart, LSTM alone vs LSTM+VQC, per asset
+- `portfolio_selection.png` — expected returns bar chart with QAOA's selected assets highlighted
+- `correlation_heatmap.png` — real historical return correlation matrix across all 5 assets
+
+Regenerate with `python visualize_pipeline.py` after running `multi_asset_forecast.py` and `real_hybrid_pipeline.py` (it reads their output files).
 
 ## Files
 
-- `qiskit_vqc_correction.py` — full training + evaluation script
-- `qiskit_vqc_test_results.csv` — held-out test predictions
+- `multi_asset_forecast.py` — Stage 1: LSTM+VQC forecasting for all 5 assets
+- `qaoa_portfolio_optimization.py` — Stage 2: QAOA allocation (standalone demo)
+- `real_hybrid_pipeline.py` — full pipeline using real multi-asset forecasts
+- `visualize_pipeline.py` — generates all 4 visualizations above
+- `hybrid_forecast_to_portfolio.py` — earlier partial version (1 real + 4 placeholder assets)
+- `qiskit_vqc_correction.py` — original single-asset (Tech-only) forecasting model
+- `pull_portfolio_data.py` — run locally to pull fresh data via yfinance
 - `quantum_trading_overview.Rmd` — full technical write-up and methodology
-- `data/` — LSTM backtest output the model trains on *(see note below)*
+- `asset_data/` — real historical data for all 5 assets (training + testing splits)
+- `visualizations/` — output charts + the per-asset comparison CSVs they're built from
 
-## ⚠️ Data dependency
+## Data dependency
 
-This script trains on real out-of-sample LSTM backtest output, not
-synthetic data. It expects:
+`multi_asset_forecast.py` and `real_hybrid_pipeline.py` expect the 10
+`<asset>_training_data.csv` / `<asset>_testing_data.csv` files (from
+`asset_data/`) in the working directory, plus `real_mu.npy` and
+`real_cov.npy` (generated by running `multi_asset_forecast.py` first —
+`real_hybrid_pipeline.py` depends on that output).
 
-```
-data/backtesting_results.csv   # LSTM Predicted Price vs Real Price
-data/testing_data.csv          # VIX Price, Pct Change (same dates)
-```
+`qiskit_vqc_correction.py` and `hybrid_forecast_to_portfolio.py` still
+depend on the original single-asset `backtesting_results.csv` /
+`testing_data.csv` files, kept for reference alongside the newer
+multi-asset versions.
 
-Re-add these two files under `data/` (and update the two `pd.read_csv(...)`
-paths in `qiskit_vqc_correction.py` to match) before running — the script
-will not execute without them.
+## Honest caveats
 
-## Honest caveat
-
-39 test days is enough to show the mechanism generalizes beyond its
-training window, but too small a sample to claim a robust, production-grade
-edge. Framed accurately: *"a trainable quantum correction layer that
-measurably reduced out-of-sample error on this dataset,"* not "quantum
-beats classical forecasting" as a general claim.
+- 5 years of data per asset is enough to demonstrate the method
+  end-to-end but is not a rigorous backtest — no transaction costs,
+  slippage, or walk-forward re-training across multiple periods.
+- Healthcare's +64% implied annualized return is a real model output but
+  an outlier worth treating with skepticism rather than as a literal
+  forecast — small test windows can produce extreme extrapolated returns.
+- The 5-asset QAOA universe is small enough that exact classical search
+  is trivial too — QAOA matching the optimum here demonstrates the
+  method is correctly wired, not that quantum beats classical at this
+  scale. The real case for a quantum advantage is at much larger,
+  harder-to-search asset universes, which is untested here.
+- All quantum circuits here run on Qiskit's local simulator, not real
+  quantum hardware.
